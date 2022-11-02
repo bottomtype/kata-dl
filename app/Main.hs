@@ -151,7 +151,7 @@ main = do
   sources <- case params.localRaws of
     Nothing -> getKataUrls
     Just path -> getFiles path
-  forM_ sources (getRaw (isJust params.localRaws) >=> processChapter params)
+  forM_ sources (getRaw params >=> maybeM (processChapter params))
 
 
 
@@ -165,14 +165,30 @@ getKataUrls = do
     Nothing -> error "Error while scraping index for URLs"
     Just us -> pure us
 
-getRaw :: Bool -> String -> IO Text
-getRaw local = if local then T.readFile else ((putStrLn "Waiting..." >> threadDelay 2000000 >>) . getUrl)
+getRaw :: Params -> String -> IO (Maybe Text)
+getRaw params p = if isJust params.localRaws then Just <$> T.readFile p else do
+  inf <- runExceptF $ parseKataUrl (T.pack p)
+  let name = filename params.baseDir params.dirInfo inf
+      nameRaw = name Raw
+      nameTxt = name Plain
+  existsH <- doesFileExist nameRaw
+  existsT <- doesFileExist nameTxt
+  if existsH then do
+    putStrLn (nameRaw ++ " exists, using local file instead of downloading again")
+    Just <$> T.readFile nameRaw
+  else if existsT && not params.dontProcess then do
+    putStrLn (nameTxt ++ " exists, skipping")
+    return Nothing
+  else do
+    putStrLn "Waiting..."
+    threadDelay 2000000
+    Just <$> getUrl p
 
 processChapter :: Params -> Text -> IO ()
 processChapter params raw = do
   (inf, mfmt) <- runExceptF . scrapeStringLikeF "Error while scraping html" raw $ scrapeChapter params.dirInfo params.dontProcess
   unless (params.discardRaws || isJust params.localRaws) $ write inf Raw raw
-  maybeM mfmt $ write inf Plain . renders
+  maybeM (write inf Plain . renders) mfmt
   where
     write = writeKataFile params.baseDir params.dirInfo
 
@@ -224,9 +240,12 @@ extension :: FileType -> String
 extension Plain = "txt"
 extension Raw = "html"
 
+filename :: FilePath -> NameFmt -> ChapterInfo -> FileType -> FilePath
+filename basedir fmt inf ty = basedir </> directory ty </> renderName inf fmt -<.> extension ty
+
 writeKataFile :: FilePath -> NameFmt -> ChapterInfo -> FileType -> Text -> IO ()
 writeKataFile basedir fmt inf ty t = do
-  let outFile = basedir </> directory ty </> renderName inf fmt -<.> extension ty
+  let outFile = filename basedir fmt inf ty
       outDir = takeDirectory outFile
   createDirectoryIfMissing True outDir
   putStrLn $ "Writing " ++ outFile
@@ -298,9 +317,9 @@ getFiles path = do
   return (files ++ concat files')
 
 
-maybeM :: Applicative f => Maybe a -> (a -> f ()) -> f ()
-maybeM Nothing f = pure ()
-maybeM (Just a) f = f a
+maybeM :: Applicative f => (a -> f ()) -> Maybe a -> f ()
+maybeM f Nothing = pure ()
+maybeM f (Just a) = f a
 
 partitionM :: Applicative f => (a -> f Bool) -> [a] -> f ([a], [a])
 partitionM p = foldr f (pure ([], [])) where
