@@ -119,13 +119,13 @@ optParser = Params
   <$> switch (long "download-only" <> short 'd' <> help "Download chapters from katalepsis.net but don't extract their content")
   <*> option optionalStr (value Nothing <> long "local-chapters" <> short 'l' <> metavar "DIR" <> help "Use chapters in DIR instead of downloading them from katalepsis.net")
   <*> switch (long "discard-html" <> short 'x' <> help "Don't save unprocessed html files")
-  <*> strOption (long "out-dir" <> short 'o' <> metavar "DIR" <> value (addTrailingPathSeparator "chapters") <> help "The base directory in which to save output files")
+  <*> strOption (long "out-dir" <> short 'o' <> metavar "DIR" <> value (addTrailingPathSeparator "chapters") <> showDefault <> help "The base directory in which to save output files")
   <*> option formatReader (value defaultFormat <> long "format" <> short 'f' <> metavar "FORMAT" <> (helpDoc $ Just doc))
   where
     para = foldr (\d d' -> string d <> softline <> d') mempty . words
     doc =  para "The naming scheme used when saving chapter files." <> linebreak <> para "May contain the following format specifiers:" <> linebreak
         <> indent 5 (vcat $ specsDoc <$> specs) <> linebreak
-        <> para ("(default: '%a-%n" ++ [pathSeparator] ++ "%n-%a-%c')")
+        <> para ("(default: \"%a-%n" ++ [pathSeparator] ++ "%n-%a-%c\")")
     specs =
       [ ("%n", "Arc name")
       , ("%a", "Arc number")
