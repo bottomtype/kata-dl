@@ -1,0 +1,27 @@
+cabal-version:      3.4
+name:               kata-dl
+version:            0.1.0.0
+license:            Unlicense
+license-file:       LICENSE
+author:             lilith
+build-type:         Simple
+common warnings
+    ghc-options: -Wall
+
+executable kata-dl
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:    base
+                    , text
+                    , bytestring
+                    , transformers
+                    , mtl
+                    , filepath
+                    , directory
+                    , scalpel
+                    , http-client
+                    , http-client-tls
+                    , http-types
+                    , optparse-applicative
+    hs-source-dirs:   app
+    default-language: GHC2021
