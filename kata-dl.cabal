@@ -19,9 +19,11 @@ executable kata-dl
                     , filepath
                     , directory
                     , scalpel
+                    , tagsoup
                     , http-client
                     , http-client-tls
                     , http-types
                     , optparse-applicative
+                    , exceptions
     hs-source-dirs:   app
     default-language: GHC2021

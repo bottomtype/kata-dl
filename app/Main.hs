@@ -1,337 +1,132 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedLists #-}
 
-import Data.Maybe
-import Data.Char
-import Data.List
-import Data.String
-import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import qualified Data.Text.Read as T
-import qualified Data.Text.Encoding as T
-import qualified Data.ByteString.Lazy as LBS
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NE
+import Data.Bifunctor
+import Text.Read (readMaybe)
 
 import Control.Applicative
 import Control.Monad
-import Control.Monad.Trans.Except
-import Control.Monad.Error.Class
-import Control.Monad.IO.Class
-
-import Control.Concurrent
-
-import System.FilePath
-import System.Directory
-
-import qualified Network.HTTP.Client as HTTP
-import qualified Network.HTTP.Client.TLS as HTTP
-import qualified Network.HTTP.Types.Status as HTTP
-
-import Text.HTML.Scalpel
+import Control.Monad.Reader
 
 import Options.Applicative
 import Options.Applicative.Help (softline, linebreak, string, indent, fill, vcat)
 
+import Kata.Base
+import Kata.Scrape
 
 
--------------- Plaintext Tree
+main :: IO ()
+main = do
+  params' <- execParser opts
+  params <- case params' of
+    Just p -> return p
+    Nothing -> getParamsInteractive
+  flip runReaderT params $ do
+    sources <- getSources
+    forM_ sources (prepareSource >=> processChapter)
 
-data Formatted
-  = Newline
-  | Plaintext Text
-  | Paragraph [Formatted]
-  | Collect [Formatted]
-  | Skip
-  deriving Show
-
-render :: Formatted -> Text
-render Newline = "\n"
-render (Plaintext s) = s
-render (Paragraph fs) = renders fs <> "\n\n"
-render (Collect fs) = renders fs
-render Skip = ""
-
-renders :: [Formatted] -> Text
-renders = T.concat . fmap render
-
-
-
---------------- Name Format
-
-data Padding = NoPad | YesPad deriving Show
-
-data NameComponent = Txt String | ArcName | ArcNumber Padding | ChapterNumber Padding deriving Show
-
-type NameFmt = [NameComponent]
-
-showIntPadding :: Padding -> Int -> String
-showIntPadding NoPad = show
-showIntPadding YesPad = justifyRight 2 '0' . show
-
-renderName :: ChapterInfo -> NameFmt -> String
-renderName inf = foldr f "" where
-  f (Txt t) n = t <> n
-  f ArcName n = T.unpack inf.arcName <> n
-  f (ArcNumber p) n = showIntPadding p inf.arcNumber <> n
-  f (ChapterNumber p) n = showIntPadding p inf.chapter <> n
-
-parseNameComponent :: MonadError String m => Char -> m NameComponent
-parseNameComponent 'n' = pure ArcName
-parseNameComponent 'A' = pure (ArcNumber YesPad)
-parseNameComponent 'a' = pure (ArcNumber NoPad)
-parseNameComponent 'C' = pure (ChapterNumber YesPad)
-parseNameComponent 'c' = pure (ChapterNumber NoPad)
-parseNameComponent c = throwError $ "Failed to parse name component " ++ [c]
-
-parseFormat :: MonadError String m => String -> m NameFmt
-parseFormat st = when (null st) (throwError "FORMAT may not be empty") >> go st where
-  go t = let (p, s) = break (== '%') t in
-    case uncons (drop 1 s) of
-      Nothing -> return [Txt p]
-      Just (c, s') -> do
-        comp <- parseNameComponent c
-        rest <- go s'
-        return $ Txt p : comp : rest
 
 
 
 --------------- Command Line Parameters
 
-data Params = Params
-  { dontProcess :: Bool
-  , localRaws :: Maybe FilePath
-  , discardRaws :: Bool
-  , baseDir :: FilePath
-  , dirInfo :: NameFmt
-  }
-
 formatReader :: ReadM NameFmt
-formatReader = eitherReader (runExcept . parseFormat)
+formatReader = eitherReader (first show . parseFormat)
 
-defaultFormat :: NameFmt
-defaultFormat = [ArcNumber NoPad, Txt "-", ArcName, Txt [pathSeparator], ArcName, Txt "-", ArcNumber NoPad, Txt "-", ChapterNumber NoPad]
+interactiveParser :: Parser (Maybe Params)
+interactiveParser = Nothing <$ switch (long "interactive" <> short 'i' <> help "Give options interactively")
 
-optionalStr :: IsString a => ReadM (Maybe a)
-optionalStr = maybeReader (Just . Just . fromString)
-
-optParser :: Parser Params
-optParser = Params
+optParser :: Parser (Maybe Params)
+optParser = switch (long "command-line" <> short 'c' <> help "Give options as command line arguments") *> fmap Just (Params
   <$> switch (long "download-only" <> short 'd' <> help "Download chapters from katalepsis.net but don't extract their content")
-  <*> option optionalStr (value Nothing <> long "local-chapters" <> short 'l' <> metavar "DIR" <> help "Use chapters in DIR instead of downloading them from katalepsis.net")
+  <*> (optional $ strOption (long "local-chapters" <> short 'l' <> metavar "DIR" <> help "Use chapters in DIR instead of downloading them from katalepsis.net"))
   <*> switch (long "discard-html" <> short 'x' <> help "Don't save unprocessed html files")
-  <*> strOption (long "out-dir" <> short 'o' <> metavar "DIR" <> value (addTrailingPathSeparator "chapters") <> showDefault <> help "The base directory in which to save output files")
   <*> option formatReader (value defaultFormat <> long "format" <> short 'f' <> metavar "FORMAT" <> (helpDoc $ Just doc))
+  )
   where
     para = foldr (\d d' -> string d <> softline <> d') mempty . words
-    doc =  para "The naming scheme used when saving chapter files." <> linebreak <> para "May contain the following format specifiers:" <> linebreak
-        <> indent 5 (vcat $ specsDoc <$> specs) <> linebreak
-        <> para ("(default: \"%a-%n" ++ [pathSeparator] ++ "%n-%a-%c\")")
-    specs =
-      [ ("%n", "Arc name")
-      , ("%a", "Arc number")
-      , ("%c", "Chapter number")
-      , ("%A", "Arc number with leading zeroes")
-      , ("%C", "Chapter number with leading zeroes")
-      ]
+    doc =  para "The naming scheme used when saving chapter files" <> linebreak <> para "May contain the following format specifiers:" <> linebreak
+        <> indent 5 (vcat $ specsDoc <$> fmtSpecs) <> linebreak
+        <> para ("(default: " ++ defaultFmtString ++ ")")
+
     specsDoc (s, t) = fill 5 (string s) <> string t
 
-opts :: ParserInfo Params
-opts = info (optParser <**> helper)
+opts :: ParserInfo (Maybe Params)
+opts = info (interactiveParser <|> optParser <**> helper)
   $ fullDesc
   <> progDesc "Download and extract plaintext content from Katalepsis chapters"
   <> header "kata-dl -- A Katalepsis Archival Program"
 
 
 
---------------- Main
-
-main :: IO ()
-main = do
-  params <- execParser opts
-  sources <- case params.localRaws of
-    Nothing -> getKataUrls
-    Just path -> getFiles path
-  forM_ sources (getRaw params >=> maybeM (processChapter params))
 
 
+--------------- Interactive Parameters
+
+getOpt :: a -> (String -> Maybe a) -> IO a
+getOpt d act = loop where
+  loop = do
+    input <- getLine
+    if null input then
+      return d
+    else case act input of
+      Nothing -> putStrLn "invalid input, please try again" >> loop
+      Just x -> putStrLn "" >> return x
+
+getSwitch :: NonEmpty (String, a) -> IO a
+getSwitch os = printOpts >> getOpt (snd . NE.head $ os) (readMaybe >=> index as . pred) where
+  as = NE.toList . fmap snd $ os
+  addDefault (x:|xs) = (x ++ " (default)") :| xs
+  os' = zip ([1..] :: [Int]) . NE.toList . addDefault . fmap fst $ os
+  printOpts = mapM_ (\(i, s) -> putStrLn ("  " ++ show i ++ ") " ++ s)) os'
 
 
---------------- Katalepsis Scraping
-
-getKataUrls :: IO [String]
-getKataUrls = do
-  raw <- getUrl "https://katalepsis.net/table-of-contents/"
-  case scrapeStringLike raw (content extractUrls) of
-    Nothing -> error "Error while scraping index for URLs"
-    Just us -> pure us
-
-getRaw :: Params -> String -> IO (Maybe Text)
-getRaw params p = if isJust params.localRaws then Just <$> T.readFile p else do
-  inf <- runExceptF $ parseKataUrl (T.pack p)
-  let name = filename params.baseDir params.dirInfo inf
-      nameRaw = name Raw
-      nameTxt = name Plain
-  existsH <- doesFileExist nameRaw
-  existsT <- doesFileExist nameTxt
-  if existsH then do
-    putStrLn (nameRaw ++ " exists, using local file instead of downloading again")
-    Just <$> T.readFile nameRaw
-  else if existsT && not params.dontProcess then do
-    putStrLn (nameTxt ++ " exists, skipping")
-    return Nothing
-  else do
-    putStrLn "Waiting..."
-    threadDelay 2000000
-    Just <$> getUrl p
-
-processChapter :: Params -> Text -> IO ()
-processChapter params raw = do
-  (inf, mfmt) <- runExceptF . scrapeStringLikeF "Error while scraping html" raw $ scrapeChapter params.dirInfo params.dontProcess
-  unless (params.discardRaws || isJust params.localRaws) $ write inf Raw raw
-  maybeM (write inf Plain . renders) mfmt
+askDownload :: IO (Maybe FilePath, Bool, Bool)
+askDownload = do
+  putStrLn "Do you want to download the chapters from katalepsis.net or use a local source?"
+  join $ getSwitch [("Download from katalepsis.net", download), ("Use local chapter files", lcl)]
   where
-    write = writeKataFile params.baseDir params.dirInfo
+    download = do
+      d <- askDiscard
+      e <- askExtract
+      return (Nothing, d, e)
 
-scrapeChapter :: (MonadError String m, MonadIO m) => NameFmt -> Bool -> ScraperT Text m (ChapterInfo, Maybe [Formatted])
-scrapeChapter fmt dontProc = do
-  url <- originalUrl
-  inf <- parseKataUrl url
-  if not dontProc then do
-    liftIO $ T.putStrLn $ "Processing " <> url
-    t <- content extractText
-    return (inf, Just t)
-  else
-    return (inf, Nothing)
+    lcl = do
+      l <- askLocalSources
+      return (Just l, True, False)
 
-extractText :: Monad m => ScraperT Text m [Formatted]
-extractText = inSerial . many . stepNext $ extractOne where
+askDiscard :: IO Bool
+askDiscard = do
+  putStrLn "Do you wish to keep the original html files?"
+  getSwitch [("Yes", False), ("No", True)]
 
-  extractOne = newline <|> plaintext <|> paragraph <|> link <|> skip
+askLocalSources :: IO FilePath
+askLocalSources = do
+  putStrLn "Please enter the directory you want to read the chapters from"
+  resp <- getLine
+  putStrLn ""
+  return resp
 
-  newline = Newline <$ matches (sister "br")
-  plaintext = Plaintext <$> text (sister textSelector)
-  paragraph = Paragraph <$> chroot (sister "p") extractText
-  link = Skip <$ matches (sister ("a" @: [match $ const . (== "href")]))
-  skip = Collect <$> chroot anySelector extractText
-
-content :: Monad m => ScraperT Text m a -> ScraperT Text m a
-content = chroot ("div" @: [hasClass "entry-content"])
-
-extractUrls :: Scraper Text [String]
-extractUrls = fmap T.unpack <$> attrs "href" "a"
-
-originalUrl :: Monad m => ScraperT Text m Text
-originalUrl = attr "href" ("link" @: ["rel" @= "canonical"])
+askExtract :: IO Bool
+askExtract = do
+  putStrLn "Would you like to extract the chapter content?"
+  getSwitch [("Yes", False), ("No", True)]
 
 
-
---------------- File Writing
-
-data FileType = Plain | Raw
-
-toplevel :: FilePath
-toplevel = "./output/"
-
-directory :: FileType -> FilePath
-directory Plain = "plaintext"
-directory Raw = "html"
-
-extension :: FileType -> String
-extension Plain = "txt"
-extension Raw = "html"
-
-filename :: FilePath -> NameFmt -> ChapterInfo -> FileType -> FilePath
-filename basedir fmt inf ty = basedir </> directory ty </> renderName inf fmt -<.> extension ty
-
-writeKataFile :: FilePath -> NameFmt -> ChapterInfo -> FileType -> Text -> IO ()
-writeKataFile basedir fmt inf ty t = do
-  let outFile = filename basedir fmt inf ty
-      outDir = takeDirectory outFile
-  createDirectoryIfMissing True outDir
-  putStrLn $ "Writing " ++ outFile
-  T.writeFile outFile t
+askFormat :: IO NameFmt
+askFormat = do
+  putStrLn "Please enter the naming scheme to be used for the output"
+  putStrLn "The scheme may use the following format specifiers:"
+  mapM_ (\(s, d) -> putStrLn ("  " ++ s ++ "     " ++ d)) fmtSpecs
+  putStrLn $ "(default: " ++ defaultFmtString ++ ")"
+  getOpt defaultFormat $ \s -> case parseFormat s of
+    Left _ -> Nothing
+    Right fmt -> Just fmt
 
 
-
-
---------------- Chapter Info
-
-data ChapterInfo = KC { fullUrl :: Text , fullName :: Text , arcName :: Text , arcNumber :: Int , chapter :: Int } deriving Show
-
-parseKataUrl :: MonadError String m => Text -> m ChapterInfo
-parseKataUrl url = let
-  fullName = correctArc1Name . last . T.splitOn "/" . dropSuffix "/" $ url
-  (arcName, numStr) = T.break isDigit $ fullName
-  (arcStr, chapStr) = T.break (== '-') $ numStr
-  in do
-    arc <- readNumber "arc" arcStr
-    chap <- readNumber "chapter" (T.tail chapStr)
-    return $ KC url fullName (T.init arcName) arc chap
-  where
-    readNumber ty s = either
-      (const $ throwError $ "Error: Couldn't parse " ++ ty ++ " number '" ++ T.unpack s ++ "' in url '" ++ T.unpack url ++ "'")
-      (return . fst)
-      (T.decimal s)
-
-correctArc1Name :: Text -> Text
-correctArc1Name s = case T.stripPrefix "mindcorrelating" s of
-  Just rest -> "mind-correlating" <> rest
-  Nothing -> s
-
-
-
---------------- Utils
-
-runExceptF :: MonadFail m => ExceptT String m a -> m a
-runExceptF x = do
-  res <- runExceptT x
-  case res of
-    Left err -> fail err
-    Right a -> return a
-
-scrapeStringLikeF :: MonadFail m => String -> Text -> ScraperT Text m a -> m a
-scrapeStringLikeF e t s = do
-  res <- scrapeStringLikeT t s
-  case res of
-    Nothing -> fail e
-    Just a -> return a
-
-sister :: Selector -> Selector
-sister = flip atDepth 0
-
-
-getUrl :: String -> IO Text
-getUrl url = do
-  manager <- HTTP.getGlobalManager
-  request <- HTTP.parseRequest url
-  putStrLn $ "Downloading " ++ url
-  response <- HTTP.httpLbs request manager
-  putStrLn $ "Got status: " ++ (show . HTTP.statusCode . HTTP.responseStatus $ response)
-  return . T.decodeUtf8 . LBS.toStrict . HTTP.responseBody $ response
-
-getFiles :: FilePath -> IO [FilePath]
-getFiles path = do
-  entries <- listDirectory path
-  (files, dirs) <- partitionM doesFileExist ((path </>) <$> entries)
-  files' <- mapM getFiles dirs
-  return (files ++ concat files')
-
-
-maybeM :: Applicative f => (a -> f ()) -> Maybe a -> f ()
-maybeM f Nothing = pure ()
-maybeM f (Just a) = f a
-
-partitionM :: Applicative f => (a -> f Bool) -> [a] -> f ([a], [a])
-partitionM p = foldr f (pure ([], [])) where
-  f x xs = g x <$> p x <*> xs
-  g x b (l, r) = if b then (x : l, r) else (l, x : r)
-
-dropSuffix :: Text -> Text -> Text
-dropSuffix s t = case T.stripSuffix s t of
-  Nothing -> t
-  (Just t') -> t'
-
-justifyRight :: Int -> Char -> String -> String
-justifyRight l c s
-  | l > length s = replicate (l - length s) c ++ s
-  | otherwise = s
+getParamsInteractive :: IO Params
+getParamsInteractive = do
+  (lcl, discard, dontExtract) <- askDownload
+  fmt <- askFormat
+  return Params { dontExtract = dontExtract, localRaws = lcl, discardRaws = discard, fileFormat = fmt }
