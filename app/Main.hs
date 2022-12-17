@@ -69,7 +69,7 @@ getOpt d act = loop where
   loop = do
     input <- getLine
     if null input then
-      return d
+      putStrLn "" >> return d
     else case act input of
       Nothing -> putStrLn "invalid input, please try again" >> loop
       Just x -> putStrLn "" >> return x
@@ -98,7 +98,7 @@ askDownload = do
 
 askDiscard :: IO Bool
 askDiscard = do
-  putStrLn "Do you wish to keep the original html files?"
+  putStrLn "Do you want to keep the original html files?"
   getSwitch [("Yes", False), ("No", True)]
 
 askLocalSources :: IO FilePath
@@ -110,9 +110,8 @@ askLocalSources = do
 
 askExtract :: IO Bool
 askExtract = do
-  putStrLn "Would you like to extract the chapter content?"
+  putStrLn "Do you want to extract the chapter content?"
   getSwitch [("Yes", False), ("No", True)]
-
 
 askFormat :: IO NameFmt
 askFormat = do

@@ -26,14 +26,16 @@ data Formatted
   | Collect [Formatted]
   deriving Show
 
-renderWith :: (Text -> Text) -> Formatted -> Text
-renderWith f Newline = "\n"
-renderWith f (Plaintext s) = f s
-renderWith f (Paragraph fs) = rendersWith f fs <> "\n\n"
-renderWith f (Collect fs) = rendersWith f fs
 
-rendersWith :: (Text -> Text) -> [Formatted] -> Text
-rendersWith f = T.concat . fmap (renderWith f)
+
+renderWith :: (Text -> Text) -> Formatted -> Text
+renderWith f = go where
+  go Newline = "\n"
+  go (Plaintext s) = f s
+  go (Paragraph fs) = gos fs <> "\n\n"
+  go (Collect fs) = gos fs
+
+  gos = T.concat . fmap go
 
 render :: Formatted -> Text
 render = renderWith T.strip
@@ -47,8 +49,8 @@ data ChapterInfo = KC { fullUrl :: Text , fullName :: Text , arcName :: Text , a
 parseKataUrl :: MonadThrow m => Text -> m ChapterInfo
 parseKataUrl url = let
   fullName = correctArc1Name . last . T.splitOn "/" . dropSuffix "/" $ url
-  (arcName, numStr) = T.break isDigit $ fullName
-  (arcStr, chapStr) = T.break (== '-') $ numStr
+  (arcName, numStr) = T.break isDigit fullName
+  (arcStr, chapStr) = T.break (== '-') numStr
   in do
     arc <- readNumber "arc" arcStr
     chap <- readNumber "chapter" (T.tail chapStr)
@@ -88,16 +90,18 @@ showIntPadding :: Padding -> Int -> String
 showIntPadding NoPad = show
 showIntPadding YesPad = justifyRight 2 '0' . show
 
+renderNameComponent :: FileType -> ChapterInfo -> NameComponent -> String
+renderNameComponent ty inf (Txt t) = t
+renderNameComponent ty inf ArcName = T.unpack inf.arcName
+renderNameComponent ty inf (ArcNumber p) = showIntPadding p inf.arcNumber
+renderNameComponent ty inf (ChapterNumber p) = showIntPadding p inf.chapter
+renderNameComponent ty inf FileType = directory ty
+
 renderName :: FileType -> ChapterInfo -> NameFmt -> String
-renderName ty inf = foldr f "" where
-  f (Txt t) n = t <> n
-  f ArcName n = T.unpack inf.arcName <> n
-  f (ArcNumber p) n = showIntPadding p inf.arcNumber <> n
-  f (ChapterNumber p) n = showIntPadding p inf.chapter <> n
-  f FileType n = directory ty <> n
+renderName ty inf = foldr ((<>) . renderNameComponent ty inf) ""
 
 filename :: NameFmt -> ChapterInfo -> FileType -> FilePath
-filename fmt inf ty = renderName ty inf fmt -<.> extension ty
+filename fmt inf ty = renderName ty inf fmt <.> extension ty
 
 parseNameComponent :: MonadThrow m => Char -> m NameComponent
 parseNameComponent 'n' = pure ArcName
@@ -141,10 +145,10 @@ fmtSpecs =
   ]
 
 defaultFmtString :: String
-defaultFmtString = "chapters/%t" ++ [pathSeparator] ++ "%a-%n" ++ [pathSeparator] ++ "%n-%a-%c"
+defaultFmtString = "chapters" ++ [pathSeparator] ++ "%t" ++ [pathSeparator] ++ "%a-%n" ++ [pathSeparator] ++ "%n-%a-%c"
 
 defaultFormat :: NameFmt
-defaultFormat = [Txt "chapters/", FileType, Txt "/", ArcNumber NoPad, Txt "-", ArcName, Txt [pathSeparator], ArcName, Txt "-", ArcNumber NoPad, Txt "-", ChapterNumber NoPad]
+defaultFormat = [Txt ("chapters" ++ [pathSeparator]), FileType, Txt [pathSeparator], ArcNumber NoPad, Txt "-", ArcName, Txt [pathSeparator], ArcName, Txt "-", ArcNumber NoPad, Txt "-", ChapterNumber NoPad]
 
 
 
