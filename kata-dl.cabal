@@ -1,6 +1,6 @@
 cabal-version:      3.4
 name:               kata-dl
-version:            0.1.0.0
+version:            1.0.0.0
 license:            Unlicense
 license-file:       LICENSE
 author:             lilith
