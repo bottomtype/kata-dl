@@ -125,7 +125,7 @@ extractInfo :: MonadThrow m => ScraperT Text m ChapterInfo
 extractInfo = originalUrl >>= parseKataUrl
 
 extractText :: Monad m => ScraperT Text m Formatted
-extractText = Collect <$> manyBetween linkPara linkPara extractOne where
+extractText = Collect <$> collectBetween linkPara linkPara paragraph where
 
   extractOne = newline <|> plaintext <|> paragraph <|> other
   go = inSerial . many $ stepNext extractOne
@@ -135,7 +135,8 @@ extractText = Collect <$> manyBetween linkPara linkPara extractOne where
   paragraph = Paragraph <$> chroot ("p" `atDepth` 0) go
   other = Collect <$> chroot anySelector go
 
-  linkPara = chroot ("p" `atDepth` 0) $ matches "a"
+  linkPara = guardM $ any (`elem` ["Previous Chapter", "Next Chapter"]) <$> chroot ("p" `atDepth` 0) (texts "a")
+    -- chroot ("p" `atDepth` 0) $ matches "a"
 
 content :: Monad m => ScraperT Text m a -> ScraperT Text m a
 content = chroot ("div" @: [hasClass "entry-content"])
@@ -155,10 +156,10 @@ scrapeE e s ts = do
     Nothing -> throwM e
     Just a -> return a
 
-manyBetween :: (Monad m, StringLike t) => ScraperT t m () -> ScraperT t m () -> ScraperT t m a -> ScraperT t m [a]
-manyBetween l r s = inSerial $ seekNext l >> loop where
+collectBetween :: (Monad m, StringLike t) => ScraperT t m () -> ScraperT t m () -> ScraperT t m a -> ScraperT t m [a]
+collectBetween l r s = inSerial $ seekNext l >> loop where
   loop = do
-    res <- stepNext next
+    res <- seekNext next
     case res of
       Left _ -> return []
       Right a -> (a:) <$> loop
@@ -186,6 +187,9 @@ partitionM :: Applicative f => (a -> f Bool) -> [a] -> f ([a], [a])
 partitionM p = foldr f (pure ([], [])) where
   f x xs = g x <$> p x <*> xs
   g x b (l, r) = if b then (x : l, r) else (l, x : r)
+
+guardM :: MonadPlus m => m Bool -> m ()
+guardM mb = mb >>= \b -> if b then pure () else empty
 
 index :: [a] -> Int -> Maybe a
 index xs i = case drop i xs of

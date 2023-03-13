@@ -38,7 +38,7 @@ renderWith f = go where
   gos = T.concat . fmap go
 
 render :: Formatted -> Text
-render = renderWith T.strip
+render = renderWith id
 
 
 
